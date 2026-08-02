@@ -36,7 +36,20 @@ jobs:
           TWIDGET_API_KEY: ${{ secrets.TWIDGET_API_KEY }}
           DIBBS_FSCS: ${{ secrets.DIBBS_FSCS }}
           DIBBS_NSNS: ${{ secrets.DIBBS_NSNS }}
+          DEBUG_HTML: "true"   # saves raw HTML snapshots for debugging; turn off once things work
         run: python dibbs_to_trello.py
+
+      # Uploads the raw HTML snapshots (see save_debug() in the script) as a
+      # downloadable zip on the run's summary page -- this is how we can see
+      # exactly what DIBBS actually returned at each step, without needing
+      # more screenshots. Runs even if the script step above found 0 results.
+      - name: Upload debug HTML snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-html-snapshots
+          path: debug_html/
+          if-no-files-found: ignore
 
       # Commit the updated "seen" state file back to the repo so the next
       # scheduled run knows what's already been posted.
