@@ -494,7 +494,7 @@ def send_to_twidget(solicitation):
         TWIDGET_WEBHOOK_URL,
         headers=headers,
         json=solicitation,
-        timeout=30,
+        timeout=60,  # bumped from 30s -- first-hit "cold start" delays are common on new endpoints
     )
     resp.raise_for_status()
     return resp
