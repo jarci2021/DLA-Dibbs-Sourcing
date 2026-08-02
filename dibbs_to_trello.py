@@ -158,10 +158,18 @@ def get_dibbs_session():
     resp.raise_for_status()
     save_debug("01_after_banner_handshake", resp.text)
 
-    # Some DoD warning pages require an explicit "OK" form POST rather than
-    # just a GET. If parse_search_results() below keeps getting the banner
-    # HTML instead of real results, this is the first place to look --
-    # inspect the warning page's <form> action/fields and POST to it here.
+    # CONFIRMED via real inspection: the banner's "OK" button is a plain
+    # HTML submit button -- <input type="submit" name="butAgree"
+    # value="OK" id="butAgree"> inside form#FrmBody -- not a complicated
+    # ASP.NET postback like the sort-column trick. So "clicking" it is
+    # just: resend the banner page's form fields plus butAgree=OK.
+    if "butAgree" in resp.text:
+        form_data = extract_form_state(resp.text)
+        form_data["butAgree"] = "OK"
+        resp = session.post(resp.url, data=form_data, timeout=30)
+        resp.raise_for_status()
+        save_debug("01b_after_banner_accept", resp.text)
+
     return session
 
 
