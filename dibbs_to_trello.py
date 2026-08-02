@@ -511,16 +511,29 @@ def process_results(results, seen):
     we've already processed in a prior run -- so we stop early instead
     of continuing to check the rest of the page. This also means we
     only ever need page 1 of results, not the full paginated set.
+
+    Each send is wrapped in try/except: if Twidget is slow or errors on
+    one item, we log it and move on rather than crashing the entire run
+    and losing every other solicitation that would have gone through fine.
+    Solicitations that fail to send are NOT marked as "seen", so they'll
+    be retried on the next run.
     """
     sent = 0
+    failed = 0
     for sol in results:
         key = sol["solicitation_number"]
         if key in seen:
             break  # everything from here down is older, already-seen
-        send_to_twidget(sol)
-        seen.add(key)
-        sent += 1
+        try:
+            send_to_twidget(sol)
+            seen.add(key)
+            sent += 1
+        except requests.exceptions.RequestException as e:
+            failed += 1
+            print(f"WARNING: failed to send {key} to Twidget: {e}")
         time.sleep(0.5)  # be polite to the webhook
+    if failed:
+        print(f"WARNING: {failed} solicitation(s) failed to send and will be retried next run.")
     return sent
 
 
