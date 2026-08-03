@@ -483,7 +483,7 @@ def save_seen(seen_set):
 # --------------------------------------------------------------------
 # Twidget webhook
 # --------------------------------------------------------------------
-def send_to_twidget(solicitation):
+def send_to_twidget(solicitation, log_response=False):
     headers = {"Content-Type": "application/json"}
     if TWIDGET_API_KEY:
         # Adjust this to match however your Twidget endpoint expects auth
@@ -497,6 +497,12 @@ def send_to_twidget(solicitation):
         timeout=60,  # bumped from 30s -- first-hit "cold start" delays are common on new endpoints
     )
     resp.raise_for_status()
+    if log_response:
+        # Print the endpoint's actual response body once per run -- this
+        # is how we can see whether the Trello step inside Twidget
+        # actually succeeded (e.g. returned a Trello card id/url) or
+        # silently failed without Twidget itself raising an HTTP error.
+        print(f"DEBUG: Twidget response for {solicitation['solicitation_number']}: {resp.text[:1000]}")
     return resp
 
 
@@ -525,7 +531,7 @@ def process_results(results, seen):
         if key in seen:
             break  # everything from here down is older, already-seen
         try:
-            send_to_twidget(sol)
+            send_to_twidget(sol, log_response=(sent == 0))
             seen.add(key)
             sent += 1
         except requests.exceptions.RequestException as e:
