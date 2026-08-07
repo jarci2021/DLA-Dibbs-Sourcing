@@ -98,6 +98,7 @@ get the Twidget endpoint working.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -352,8 +353,9 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
             try:
                 title = cells.nth(0).locator("a").inner_text().strip()
                 organization = cells.nth(1).inner_text().strip()
+                due_date = cells.nth(5).inner_text().strip()
             except Exception as e:
-                print(f"WARNING: failed to read a row's title/org, skipping: {e}")
+                print(f"WARNING: failed to read a row's title/org/date, skipping: {e}")
                 continue
 
             if title in processed_this_run:
@@ -368,110 +370,58 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
                 continue  # already sent to Twidget in a prior run
 
             # STAGE 2: click into the matching, not-yet-seen bid.
+            #
+            # IMPORTANT: this does a SINGLE click-based navigation only
+            # -- CONFIRMED via a captured screenshot that calling
+            # page.reload() on these /portal/... URLs triggers
+            # Cloudflare's "Verify you are human" bot challenge, which
+            # cannot be (and should not be) automated around. These
+            # detail pages are public-facing (no login required to
+            # view them), which is presumably exactly why Cloudflare
+            # guards them against scraping -- unlike the authenticated
+            # /vendors/.../open-bids listing page, which has never
+            # triggered this.
+            #
+            # Because of that, this no longer reads window.__data at
+            # all (that required a reload to populate, since it's only
+            # set on a genuine SSR page load, not a client-side route
+            # change). Instead: title/agency/closeDate come from the
+            # listing page (already have them from Stage 1), bidId
+            # comes from the URL after the single click, and
+            # description is scraped directly from the rendered DOM.
+            # naicsCode is left blank as a result -- it's genuinely not
+            # visible anywhere except window.__data, and title-keyword
+            # matching remains the primary, reliable filter regardless.
             try:
                 cells.nth(0).locator("a").click()
-
-                # Wait for a real navigation to a project detail URL,
-                # not just "network idle".
                 page.wait_for_url(lambda url: "/projects/" in url, timeout=15000)
 
-                # window.__data is a one-time snapshot injected by the
-                # server only on a genuine full page load -- CONFIRMED
-                # by testing: after click()'s client-side SPA
-                # navigation, the URL correctly changes but
-                # window.__data.publicProject.project still comes back
-                # empty, because React Router's client-side transition
-                # never rewrites that global variable (it's SSR
-                # hydration data, set once). Forcing a real reload here
-                # makes the server send a fresh, fully-populated
-                # window.__data for this exact URL.
-                #
-                # wait_until="domcontentloaded" (NOT "networkidle") --
-                # this site runs several always-on trackers (Segment,
-                # Heap, Pendo, FullStory, Faro) that keep making
-                # background requests indefinitely, so "network idle"
-                # never actually triggers and reload() just times out
-                # (CONFIRMED by a prior run). window.__data is set by
-                # an inline <script> that runs synchronously while the
-                # document parses -- well before those trackers even
-                # start -- so domcontentloaded is both sufficient and
-                # much faster here.
-                page.reload(wait_until="domcontentloaded")
+                match = re.search(r"/projects/(\d+)", page.url)
+                bid_id = match.group(1) if match else ""
 
-                # domcontentloaded doesn't guarantee window.__data's
-                # inline <script> has actually executed yet on a slow
-                # load -- CONFIRMED by a prior run where one reload's
-                # window.__data came back fully undefined (not just
-                # missing the project key, but the whole variable).
-                # Wait explicitly for it, and retry the reload once if
-                # it doesn't show up in time, before giving up on this
-                # bid entirely.
+                # Best-effort description scrape from the rendered page
+                # -- CONFIRMED class name ".introduction-description"
+                # from real page HTML (the "Summary" section
+                # specifically; there's also a "Background" section
+                # with the same class further down the page, we just
+                # take the first one). Not every posting template may
+                # include this exact class, so this degrades to an
+                # empty string rather than failing the whole bid if
+                # it's missing.
                 try:
-                    page.wait_for_function(
-                        "() => window.__data && window.__data.publicProject",
-                        timeout=10000,
-                    )
-                except PlaywrightTimeoutError:
-                    print(f"WARNING: window.__data not ready after reload for "
-                          f"'{title}', retrying once...")
-                    page.reload(wait_until="domcontentloaded")
-                    try:
-                        page.wait_for_function(
-                            "() => window.__data && window.__data.publicProject",
-                            timeout=15000,
-                        )
-                    except PlaywrightTimeoutError:
-                        # Capture exactly what's on the page when this
-                        # happens, regardless of the DEBUG_SCREENSHOTS
-                        # setting -- this failure is consistent enough
-                        # now (100% of matches in the last run) that we
-                        # need to see the actual page content to
-                        # diagnose it, not just guess further.
-                        safe_name = "".join(c if c.isalnum() else "_" for c in title)[:50]
-                        SCREENSHOT_DIR.mkdir(exist_ok=True)
-                        page.screenshot(path=str(SCREENSHOT_DIR / f"FAILED_{safe_name}.png"), full_page=True)
-                        (SCREENSHOT_DIR / f"FAILED_{safe_name}.html").write_text(page.content(), encoding="utf-8")
-                        print(f"DEBUG: current URL at failure: {page.url}")
-                        raise
-
-                detail = page.evaluate(
-                    "window.__data.publicProject.project"
-                )
-
-                if not detail:
-                    print(f"WARNING: no project data found after clicking '{title}' "
-                          f"(URL: {page.url}) -- skipping.")
-                    if "/open-bids" not in page.url:
-                        page.goto(OPEN_BIDS_URL, wait_until="networkidle")
-                    continue
-
-                bid_id = str(detail.get("id", ""))
-                bid_title = detail.get("title", title)
-                description = detail.get("rawSummary") or ""
-                # Some projects have an explicit null "government" value
-                # (not just a missing key) -- `(x or {})` handles both
-                # "key missing" and "key present but null", unlike
-                # dict.get(key, {}) which only covers the missing case.
-                government = detail.get("government") or {}
-                organization_data = government.get("organization") or {}
-                agency = organization_data.get("name", organization)
-                close_date = detail.get("proposalDeadline", "")
-                categories = detail.get("categories") or []
-                # Use the first available category code as naicsCode,
-                # if any were filled in by the posting agency -- CAN
-                # legitimately be empty (confirmed on a real posting).
-                naics_code = categories[0]["code"] if categories else ""
-                bid_url = page.url
+                    description = page.locator(".introduction-description").first.inner_text(timeout=5000).strip()
+                except Exception:
+                    description = ""
 
                 bids.append({
                     "bidId": bid_id,
-                    "title": bid_title,
+                    "title": title,
                     "description": description,
-                    "naicsCode": naics_code,
-                    "agency": agency,
-                    "closeDate": close_date,
+                    "naicsCode": "",  # not available without triggering Cloudflare's bot check
+                    "agency": organization,
+                    "closeDate": due_date,
                     "bidValue": 0,  # no such field exists in OpenGov's data
-                    "bidUrl": bid_url,
+                    "bidUrl": page.url,
                 })
                 new_fingerprints.add(fingerprint)
 
