@@ -321,9 +321,16 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
 
     bids = []
     new_fingerprints = set()
+    # Extra safety net: even if pagination silently fails to advance
+    # (which a prior run's log strongly suggested was happening -- the
+    # same bid titles kept reappearing across "different" pages), this
+    # prevents processing the exact same title more than once within a
+    # single run.
+    processed_this_run = set()
 
     for page_num in range(1, max_pages + 1):
         rows = page.locator("div.rt-tbody div.rt-tr").all()
+        print(f"DEBUG: page {page_num} -- found {len(rows)} row(s).")
 
         for row in rows:
             cells = row.locator("div.rt-td")
@@ -333,6 +340,10 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
             except Exception as e:
                 print(f"WARNING: failed to read a row's title/org, skipping: {e}")
                 continue
+
+            if title in processed_this_run:
+                continue  # safety net against pagination not actually advancing
+            processed_this_run.add(title)
 
             if not title_matches_keywords(title):
                 continue  # cheap skip, no click
@@ -344,22 +355,41 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
             # STAGE 2: click into the matching, not-yet-seen bid.
             try:
                 cells.nth(0).locator("a").click()
+
+                # Wait for a real navigation to a project detail URL,
+                # not just "network idle" -- a prior run showed
+                # window.__data.publicProject.project coming back as
+                # None/null repeatedly, which strongly suggests the
+                # click sometimes doesn't finish navigating before we
+                # try to read page state. Waiting for the URL pattern
+                # itself is a much more direct signal that we're
+                # actually on the detail page now.
+                page.wait_for_url(lambda url: "/projects/" in url, timeout=15000)
                 page.wait_for_load_state("networkidle")
 
                 detail = page.evaluate(
                     "window.__data.publicProject.project"
                 )
 
+                if not detail:
+                    print(f"WARNING: no project data found after clicking '{title}' "
+                          f"(URL: {page.url}) -- skipping.")
+                    if "/open-bids" not in page.url:
+                        page.goto(OPEN_BIDS_URL, wait_until="networkidle")
+                    continue
+
                 bid_id = str(detail.get("id", ""))
                 bid_title = detail.get("title", title)
                 description = detail.get("rawSummary") or ""
-                agency = (
-                    detail.get("government", {})
-                    .get("organization", {})
-                    .get("name", organization)
-                )
+                # Some projects have an explicit null "government" value
+                # (not just a missing key) -- `(x or {})` handles both
+                # "key missing" and "key present but null", unlike
+                # dict.get(key, {}) which only covers the missing case.
+                government = detail.get("government") or {}
+                organization_data = government.get("organization") or {}
+                agency = organization_data.get("name", organization)
                 close_date = detail.get("proposalDeadline", "")
-                categories = detail.get("categories", []) or []
+                categories = detail.get("categories") or []
                 # Use the first available category code as naicsCode,
                 # if any were filled in by the posting agency -- CAN
                 # legitimately be empty (confirmed on a real posting).
@@ -379,6 +409,7 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
                 new_fingerprints.add(fingerprint)
 
                 page.go_back(wait_until="networkidle")
+                page.wait_for_url(lambda url: "/open-bids" in url, timeout=15000)
             except Exception as e:
                 print(f"WARNING: failed to process bid '{title}', skipping: {e}")
                 # Try to get back to the listing even if something above failed.
@@ -392,9 +423,36 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
         if page_num < max_pages:
             next_button = page.locator(".pagination-bottom .-next button")
             if next_button.is_disabled():
-                break  # reached the last page early
+                print(f"DEBUG: Next button disabled after page {page_num} -- "
+                      "reached the last page.")
+                break
+
+            # Capture the first row's title before clicking, so we can
+            # confirm the table content actually changed -- a prior run's
+            # log showed the same bids repeating across "different"
+            # pages, suggesting this click wasn't reliably advancing.
+            first_row_before = rows[0].locator("div.rt-td").nth(0).locator("a").inner_text().strip() if rows else ""
+
             next_button.click()
             page.wait_for_load_state("networkidle")
+
+            try:
+                page.wait_for_function(
+                    """(prevTitle) => {
+                        const firstRow = document.querySelector('div.rt-tbody div.rt-tr');
+                        if (!firstRow) return false;
+                        const link = firstRow.querySelector('div.rt-td a');
+                        return link && link.textContent.trim() !== prevTitle;
+                    }""",
+                    arg=first_row_before,
+                    timeout=10000,
+                )
+                print(f"DEBUG: page {page_num} -> {page_num + 1} advanced successfully.")
+            except PlaywrightTimeoutError:
+                print(f"WARNING: page did not appear to change after clicking Next "
+                      f"on page {page_num} -- stopping pagination early to avoid "
+                      "re-scanning the same content.")
+                break
 
     return bids, new_fingerprints
 
