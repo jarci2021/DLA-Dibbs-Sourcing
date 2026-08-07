@@ -29,14 +29,33 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run OpenGov scraper
+        # continue-on-error lets the workflow keep going (so the artifact
+        # upload step below still runs) even if the scraper script itself
+        # fails/exits non-zero -- we WANT to see the debug output from a
+        # failed run, not just successful ones.
+        continue-on-error: true
         env:
           OPENGOV_EMAIL: ${{ secrets.OPENGOV_EMAIL }}
           OPENGOV_PASSWORD: ${{ secrets.OPENGOV_PASSWORD }}
           TWIDGET_OPENGOV_URL: ${{ secrets.TWIDGET_OPENGOV_URL }}
           OPENGOV_VENDOR_ID: '274125'
           HEADLESS: 'true'
-          DEBUG_SCREENSHOTS: 'false'
+          DEBUG_SCREENSHOTS: 'true'
         run: python scrape_opengov.py
+
+      # Uploads the debug_screenshots folder (PNG screenshots + raw HTML
+      # dumps at each step) as a downloadable artifact on this run's
+      # summary page. This is how we inspect what the real OpenGov page
+      # looks like from inside GitHub's headless runner -- download the
+      # zip, open the .html files, and search for real selectors
+      # (email/password fields, bid listing structure, etc.).
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opengov-debug-output
+          path: debug_screenshots/
+          retention-days: 7
 
       # Commits the updated "seen bids" state file back to the repo so
       # the next scheduled run knows what's already been sent. Same
