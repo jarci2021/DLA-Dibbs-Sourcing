@@ -197,33 +197,21 @@ def login(page):
     # UNCONFIRMED AND FLAGGED AS LIKELY WRONG: the real login page's HTML
     # revealed this site runs on Auth0 (there's a hidden iframe pointing
     # to an /authorize endpoint with an auth0Client parameter -- classic
-    # Auth0 "silent auth" check). That strongly suggests clicking Continue
-    # navigates to an Auth0-hosted Universal Login page for the password
-    # step -- possibly on a DIFFERENT DOMAIN than procurement.opengov.com
-    # entirely, not just a different page.
+    # Auth0 "silent auth" check). However, confirmed via a real debug run:
+    # the password step actually stays on procurement.opengov.com and
+    # does NOT redirect to a separate Auth0-hosted page -- that iframe is
+    # just a background silent-SSO check, not the actual login flow.
     #
-    # Because of that domain change:
-    #   - The password field's real selector is still unknown (we've
-    #     never seen this page -- snap(page, "03_after_continue") above
-    #     is the debug capture that will finally show it).
-    #   - If Playwright navigated to a new domain, that's expected and
-    #     fine -- Playwright follows redirects/navigations within the
-    #     same page/tab automatically, no extra code needed for that
-    #     part. We just need the real selector once we see the HTML.
-    #
-    # DO NOT trust the selectors below yet -- they're the same
-    # best-guess placeholder as before, kept only so the script doesn't
-    # crash immediately at import/definition time. After running this
-    # once, check the "opengov-debug-output" artifact's
-    # 03_after_continue.html file and replace this block with the real
-    # selectors found there.
-    password_input = page.locator('input[type="password"], input[name="password"]').first
+    # CONFIRMED from real page HTML: the password input has
+    # data-qa="login-inputText-password" and type="password" -- this
+    # matches what was already guessed below, so no change needed there.
+    password_input = page.locator('[data-qa="login-inputText-password"]')
     password_input.wait_for(state="visible", timeout=15000)
     password_input.fill(OPENGOV_PASSWORD)
     snap(page, "04_password_filled")
 
-    # UNCONFIRMED for the same reason as above.
-    page.get_by_role("button", name="Log In").click()
+    # CONFIRMED from real page HTML: data-qa="login-button-submit".
+    page.locator('[data-qa="login-button-submit"]').click()
     page.wait_for_load_state("networkidle")
     snap(page, "05_after_login")
 
