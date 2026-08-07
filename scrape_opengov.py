@@ -415,10 +415,24 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
                     print(f"WARNING: window.__data not ready after reload for "
                           f"'{title}', retrying once...")
                     page.reload(wait_until="domcontentloaded")
-                    page.wait_for_function(
-                        "() => window.__data && window.__data.publicProject",
-                        timeout=15000,
-                    )
+                    try:
+                        page.wait_for_function(
+                            "() => window.__data && window.__data.publicProject",
+                            timeout=15000,
+                        )
+                    except PlaywrightTimeoutError:
+                        # Capture exactly what's on the page when this
+                        # happens, regardless of the DEBUG_SCREENSHOTS
+                        # setting -- this failure is consistent enough
+                        # now (100% of matches in the last run) that we
+                        # need to see the actual page content to
+                        # diagnose it, not just guess further.
+                        safe_name = "".join(c if c.isalnum() else "_" for c in title)[:50]
+                        SCREENSHOT_DIR.mkdir(exist_ok=True)
+                        page.screenshot(path=str(SCREENSHOT_DIR / f"FAILED_{safe_name}.png"), full_page=True)
+                        (SCREENSHOT_DIR / f"FAILED_{safe_name}.html").write_text(page.content(), encoding="utf-8")
+                        print(f"DEBUG: current URL at failure: {page.url}")
+                        raise
 
                 detail = page.evaluate(
                     "window.__data.publicProject.project"
