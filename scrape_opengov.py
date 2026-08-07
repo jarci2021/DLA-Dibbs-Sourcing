@@ -357,15 +357,20 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
                 cells.nth(0).locator("a").click()
 
                 # Wait for a real navigation to a project detail URL,
-                # not just "network idle" -- a prior run showed
-                # window.__data.publicProject.project coming back as
-                # None/null repeatedly, which strongly suggests the
-                # click sometimes doesn't finish navigating before we
-                # try to read page state. Waiting for the URL pattern
-                # itself is a much more direct signal that we're
-                # actually on the detail page now.
+                # not just "network idle".
                 page.wait_for_url(lambda url: "/projects/" in url, timeout=15000)
-                page.wait_for_load_state("networkidle")
+
+                # window.__data is a one-time snapshot injected by the
+                # server only on a genuine full page load -- CONFIRMED
+                # by testing: after click()'s client-side SPA
+                # navigation, the URL correctly changes but
+                # window.__data.publicProject.project still comes back
+                # empty, because React Router's client-side transition
+                # never rewrites that global variable (it's SSR
+                # hydration data, set once). Forcing a real reload here
+                # makes the server send a fresh, fully-populated
+                # window.__data for this exact URL.
+                page.reload(wait_until="networkidle")
 
                 detail = page.evaluate(
                     "window.__data.publicProject.project"
