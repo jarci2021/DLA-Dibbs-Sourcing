@@ -212,6 +212,29 @@ def login(page):
 
     # CONFIRMED from real page HTML: data-qa="login-button-submit".
     page.locator('[data-qa="login-button-submit"]').click()
+
+    # A prior debug run caught this page mid-request (button still said
+    # "Logging In..." and was disabled) even after wait_for_load_state
+    # ("networkidle") had already returned -- likely because this page
+    # runs several always-on trackers (Segment, Heap, Pendo, FullStory)
+    # that keep making periodic background requests, so "network idle"
+    # may never truly occur and Playwright moves on too early.
+    #
+    # Waiting for the URL to actually leave /login is a much more
+    # reliable signal that login finished (successfully or not) than
+    # waiting for network quiet. Generous 30s timeout since this is a
+    # real login round-trip, not a local page transition.
+    try:
+        page.wait_for_url(lambda url: "/login" not in url, timeout=30000)
+    except PlaywrightTimeoutError:
+        snap(page, "05_still_on_login_after_30s")
+        print("WARNING: still on the login page 30s after submitting. "
+              "This likely means login failed (wrong password? account "
+              "locked? unexpected extra step?) rather than just being "
+              "slow -- check 05_still_on_login_after_30s.html for any "
+              "visible error message on the page.")
+        raise
+
     page.wait_for_load_state("networkidle")
     snap(page, "05_after_login")
 
