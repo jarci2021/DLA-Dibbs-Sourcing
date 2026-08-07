@@ -323,6 +323,15 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
     # further down in this function, which hit exactly this problem
     # before being switched to domcontentloaded too).
     page.goto(OPEN_BIDS_URL, wait_until="domcontentloaded")
+
+    # domcontentloaded fires once the raw HTML is parsed, but this is a
+    # React app -- the actual table rows only appear after JS runs and
+    # fetches data, which happens a beat later. CONFIRMED by a prior
+    # run finding 0 rows on the very first page load (later pages
+    # "accidentally" worked because the pagination code already waits
+    # for content to change before moving on -- this is that same kind
+    # of explicit wait, just for the very first load too).
+    page.wait_for_selector("div.rt-tbody div.rt-tr", timeout=20000)
     snap(page, "06_open_bids_page")
 
     bids = []
@@ -388,6 +397,28 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
                 # start -- so domcontentloaded is both sufficient and
                 # much faster here.
                 page.reload(wait_until="domcontentloaded")
+
+                # domcontentloaded doesn't guarantee window.__data's
+                # inline <script> has actually executed yet on a slow
+                # load -- CONFIRMED by a prior run where one reload's
+                # window.__data came back fully undefined (not just
+                # missing the project key, but the whole variable).
+                # Wait explicitly for it, and retry the reload once if
+                # it doesn't show up in time, before giving up on this
+                # bid entirely.
+                try:
+                    page.wait_for_function(
+                        "() => window.__data && window.__data.publicProject",
+                        timeout=10000,
+                    )
+                except PlaywrightTimeoutError:
+                    print(f"WARNING: window.__data not ready after reload for "
+                          f"'{title}', retrying once...")
+                    page.reload(wait_until="domcontentloaded")
+                    page.wait_for_function(
+                        "() => window.__data && window.__data.publicProject",
+                        timeout=15000,
+                    )
 
                 detail = page.evaluate(
                     "window.__data.publicProject.project"
