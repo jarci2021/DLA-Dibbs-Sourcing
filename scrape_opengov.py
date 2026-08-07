@@ -157,15 +157,40 @@ def login(page):
     email_input = page.locator('[data-qa="login-inputText-email"]')
     email_input.wait_for(state="visible", timeout=15000)
     email_input.fill(OPENGOV_EMAIL)
+
+    # The Continue button starts disabled and only enables once the form
+    # considers the email field valid. .fill() dispatches an input event,
+    # but some React forms only re-validate on blur -- pressing Tab here
+    # forces that blur, which is the fix for what looked like the button
+    # staying disabled after fill() alone in an earlier debug run.
+    page.keyboard.press("Tab")
     snap(page, "02_email_filled")
 
-    # CONFIRMED from real page HTML: data-qa="login-button-continue".
-    # This button is disabled (via the disabled attribute) until the
-    # email field has a value -- filling it above should have enabled
-    # it through React's normal controlled-input re-render, but if this
-    # click ever fails because the button is still seen as disabled,
-    # that's the thing to check first.
-    page.locator('[data-qa="login-button-continue"]').click()
+    continue_button = page.locator('[data-qa="login-button-continue"]')
+    # Explicitly wait for the button to lose its disabled state before
+    # clicking, rather than clicking immediately -- if validation is
+    # asynchronous (e.g. a debounced format check) this wait absorbs
+    # that delay instead of racing it.
+    try:
+        continue_button.wait_for(state="visible", timeout=15000)
+        page.wait_for_function(
+            """() => {
+                const btn = document.querySelector('[data-qa="login-button-continue"]');
+                return btn && !btn.disabled;
+            }""",
+            timeout=10000,
+        )
+    except PlaywrightTimeoutError:
+        snap(page, "02b_continue_still_disabled")
+        print("WARNING: Continue button never became enabled after filling "
+              "email + blur. Check 02b_continue_still_disabled.html/.png "
+              "for what's on the page -- might be a validation error "
+              "message we're not detecting, or the field needs a "
+              "different fill approach (e.g. typing character-by-character "
+              "instead of .fill()).")
+        raise
+
+    continue_button.click()
     page.wait_for_load_state("networkidle")
     snap(page, "03_after_continue")
 
