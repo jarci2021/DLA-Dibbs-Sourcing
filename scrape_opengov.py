@@ -316,7 +316,13 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
         bidId, title, description, naicsCode, agency, closeDate,
         bidValue, bidUrl
     """
-    page.goto(OPEN_BIDS_URL, wait_until="networkidle")
+    # domcontentloaded, not networkidle -- this site's always-on
+    # trackers (Segment, Heap, Pendo, FullStory, Faro) never let true
+    # network idle occur on authenticated pages, so networkidle waits
+    # here would eventually time out (CONFIRMED with the reload() call
+    # further down in this function, which hit exactly this problem
+    # before being switched to domcontentloaded too).
+    page.goto(OPEN_BIDS_URL, wait_until="domcontentloaded")
     snap(page, "06_open_bids_page")
 
     bids = []
@@ -370,7 +376,18 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
                 # hydration data, set once). Forcing a real reload here
                 # makes the server send a fresh, fully-populated
                 # window.__data for this exact URL.
-                page.reload(wait_until="networkidle")
+                #
+                # wait_until="domcontentloaded" (NOT "networkidle") --
+                # this site runs several always-on trackers (Segment,
+                # Heap, Pendo, FullStory, Faro) that keep making
+                # background requests indefinitely, so "network idle"
+                # never actually triggers and reload() just times out
+                # (CONFIRMED by a prior run). window.__data is set by
+                # an inline <script> that runs synchronously while the
+                # document parses -- well before those trackers even
+                # start -- so domcontentloaded is both sufficient and
+                # much faster here.
+                page.reload(wait_until="domcontentloaded")
 
                 detail = page.evaluate(
                     "window.__data.publicProject.project"
@@ -413,13 +430,13 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
                 })
                 new_fingerprints.add(fingerprint)
 
-                page.go_back(wait_until="networkidle")
+                page.go_back(wait_until="domcontentloaded")
                 page.wait_for_url(lambda url: "/open-bids" in url, timeout=15000)
             except Exception as e:
                 print(f"WARNING: failed to process bid '{title}', skipping: {e}")
                 # Try to get back to the listing even if something above failed.
                 if "/open-bids" not in page.url:
-                    page.goto(OPEN_BIDS_URL, wait_until="networkidle")
+                    page.goto(OPEN_BIDS_URL, wait_until="domcontentloaded")
                 continue
 
         # Pagination: CONFIRMED selector from real HTML --
@@ -439,7 +456,7 @@ def scrape_open_bids(page, seen_fingerprints, max_pages=5):
             first_row_before = rows[0].locator("div.rt-td").nth(0).locator("a").inner_text().strip() if rows else ""
 
             next_button.click()
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
 
             try:
                 page.wait_for_function(
