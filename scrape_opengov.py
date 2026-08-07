@@ -45,44 +45,49 @@ SETUP
    bids and Twidget is receiving them, before trusting it to a schedule.
 
 --------------------------------------------------------------------
-IMPORTANT -- READ BEFORE RUNNING ON A SCHEDULE
+STATUS -- what's confirmed vs. still worth watching
 --------------------------------------------------------------------
-I (Claude) could not access procurement.opengov.com/vendors/274125/open-bids
-directly -- it redirected to a login page every time, which is expected
-since it's your authenticated vendor account. That means:
+CONFIRMED via real login + scrape runs (Aug 2026):
+  - Full login flow works end-to-end: email field
+    (data-qa="login-inputText-email") -> Tab to blur -> wait for
+    Continue button (data-qa="login-button-continue") to enable ->
+    click -> password field (data-qa="login-inputText-password") ->
+    submit button (data-qa="login-button-submit") -> wait for URL to
+    leave /login (more reliable than waiting for network idle, since
+    this site runs several always-on trackers that prevent true
+    "network idle" from ever triggering).
+  - The open-bids listing is a ReactTable: div.rt-tr rows inside
+    div.rt-tbody, columns in order Project Title / Organization /
+    State / Status / Release Date / Due Date. Title cells contain an
+    <a href="#"> -- not a usable link on its own, click triggers
+    client-side routing to a real URL.
+  - Clicking a bid title navigates to
+    /portal/{org-slug}/projects/{numeric-id} -- that numeric ID is
+    used as bidId.
+  - The resulting detail page embeds a full structured JSON object at
+    window.__data.publicProject.project with id, title, rawSummary
+    (description), government.organization.name (agency),
+    proposalDeadline (close date), and categories (NAICS codes) all in
+    one place -- far more reliable than scraping rendered HTML on that
+    page.
+  - NAICS/category codes are NOT always present -- confirmed a real
+    posting (Sacramento Metro Fire's roof replacement RFB) with an
+    empty categories array. This is normal, not a scraping bug.
+  - No dollar bid-value/estimate field exists anywhere in this data --
+    bidValue is always sent as 0.
+  - Pagination uses div.pagination-bottom with a "Next" button that
+    gets a `disabled` attribute on the last page.
 
-CONFIRMED (from the actual redirect Claude saw when fetching the URL):
-  - The login page is a JS-rendered single-page app, not a plain HTML
-    form -- confirmed by the fact that a plain HTTP GET returned only a
-    login shell, not usable content. This is why Playwright (a real
-    headless browser) is used here instead of requests/BeautifulSoup.
-  - The login flow is two-step: an "Email Address" field with a
-    "Continue" button, THEN (presumably) a password field appears after
-    email is submitted -- this is a common pattern (email-first, then
-    password) but the password step's exact field name/selector is
-    UNCONFIRMED since Claude never saw it.
-  - There's a distinct "vendor login" vs "public login" -- you confirmed
-    this exists, but Claude has not seen either login form's actual HTML,
-    so the selectors below are best-guess placeholders.
+WORTH WATCHING / not yet stress-tested:
+  - This has only been run against a handful of real bids so far --
+    if a bid's detail page is missing a field this script expects
+    (e.g. a different template shape), the per-bid try/except should
+    skip it gracefully and log a warning, but hasn't been proven
+    against a wide variety of posting templates yet.
+  - MAX_PAGES defaults to 5 (see CONFIG below) as a balance between
+    catching new postings and run time -- watch for whether real new
+    bids ever show up further back than that in practice.
 
-STILL UNTESTED / NEEDS YOUR CONFIRMATION (run once manually with
-HEADLESS=false so you can watch the browser, or with DEBUG_SCREENSHOTS=true
-to capture screenshots at each step -- see bottom of this docstring):
-  - The exact selectors for the email field, continue button, password
-    field, and final login/submit button.
-  - Whether logging in lands you directly on the vendor dashboard or
-    requires an extra navigation step to reach /vendors/274125/open-bids.
-  - The actual structure of the open-bids listing: is it an HTML table,
-    a list of cards/divs, or does it load data via an internal API call
-    Playwright could intercept instead of scraping rendered HTML? (If
-    it's the latter, this script could likely be simplified a lot --
-    worth checking your browser's Network tab while logged in.)
-  - The exact field names/labels on each bid listing: does the page show
-    NAICS code directly, or only category names that would need mapping
-    back to NAICS codes? Does it show a close date, bid value, and a
-    direct link/ID for each bid?
-  - Whether the open-bids list paginates, infinite-scrolls, or shows
-    everything on one page.
 
 HOW TO HELP CONFIRM THESE: run this script locally once with:
     HEADLESS=false DEBUG_SCREENSHOTS=true python scrape_opengov.py
@@ -110,6 +115,12 @@ TWIDGET_OPENGOV_URL = os.environ.get("TWIDGET_OPENGOV_URL", "")
 VENDOR_ID = os.environ.get("OPENGOV_VENDOR_ID", "274125")
 LOGIN_URL = "https://procurement.opengov.com/login"
 OPEN_BIDS_URL = f"https://procurement.opengov.com/vendors/{VENDOR_ID}/open-bids"
+
+# How many listing pages to scan per run (each page = 20 rows, per the
+# site's default). New postings are far more likely to appear on
+# earlier pages than deep in the 72-page total list -- raise this if
+# you find real new bids being missed further back.
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "5"))
 
 # Debugging aids -- turn on locally when fixing selectors, leave off
 # (default) in the GitHub Actions scheduled run.
@@ -240,16 +251,66 @@ def login(page):
 
 
 # --------------------------------------------------------------------
+# Filtering (cheap pre-check before ever clicking into a bid)
+# --------------------------------------------------------------------
+# Same 11 keywords used in the Twidget endpoint's title filter -- kept
+# here too so we never click into (or even count against page limits)
+# a bid whose title clearly won't pass Twidget's filter anyway. This
+# does NOT replace Twidget's filter -- Twidget still re-checks NAICS +
+# keywords once the full payload is sent -- it's purely a local
+# optimization to avoid wasted clicks/page loads.
+TITLE_KEYWORDS = [
+    "purchase", "inventory", "parts", "supplies", "containers",
+    "batteries", "uniform", "medical", "apparel", "jewelry", "equipment",
+]
+
+
+def title_matches_keywords(title):
+    lower = title.lower()
+    return any(kw in lower for kw in TITLE_KEYWORDS)
+
+
+# --------------------------------------------------------------------
 # Scrape open bids
 # --------------------------------------------------------------------
-def scrape_open_bids(page):
+def scrape_open_bids(page, seen_fingerprints, max_pages=5):
     """
-    Navigates to the vendor's open-bids page and extracts each bid's
-    fields. STRUCTURE BELOW IS A BEST-GUESS PLACEHOLDER -- Claude has
-    never seen this page's real HTML (it's behind login). Once you can
-    log in and view the page yourself, use your browser's dev tools
-    (right-click a bid row -> Inspect) to find the real selectors, and
-    we'll swap them in here together.
+    Two-stage scrape of the vendor's open-bids ReactTable listing:
+
+    STAGE 1 (listing page, cheap): for each row, read Project Title,
+    Organization, State, Release Date, Due Date directly from the
+    table -- CONFIRMED structure from real page HTML:
+        div.rt-tr (one per bid) inside div.rt-tbody, cells in order:
+        [0] Project Title (a link, but href="#" -- title text only,
+            no usable ID/URL at this stage), [1] Organization,
+        [2] State, [3] Status, [4] Release Date, [5] Due Date.
+
+    Rows whose title doesn't match TITLE_KEYWORDS are skipped
+    immediately -- no click, no detail page load.
+
+    Rows whose title matches AND whose "title|organization"
+    fingerprint isn't already in `seen_fingerprints` (bids we've
+    already sent to Twidget in a prior run) get clicked into for
+    STAGE 2.
+
+    STAGE 2 (detail page, click-through): clicking a matching title
+    navigates to /portal/{org-slug}/projects/{id} -- CONFIRMED from a
+    real click-through. That page embeds a full structured JSON object
+    at window.__data.publicProject.project with everything we need:
+    id, title, rawSummary (description), government.organization.name
+    (agency), proposalDeadline (close date), categories (NAICS codes,
+    when the posting agency filled them in -- CONFIRMED some postings
+    have an empty categories array, so this can legitimately be blank).
+    No dollar bid-value field exists in this data at all -- OpenGov
+    doesn't appear to publish an estimate/budget figure the way some
+    other sources do, so bidValue is left at 0 here.
+
+    Paginates up to `max_pages` (ReactTable "Next" button, CONFIRMED
+    selector from real HTML) -- new postings are far more likely to
+    appear on earlier pages, and scanning all 72 pages every run would
+    be slow for little benefit once a source has been running a while.
+    Raise max_pages (via MAX_PAGES env var) if real new bids are found
+    to be showing up further back than this default catches.
 
     Returns a list of dicts shaped to match the Twidget endpoint schema:
         bidId, title, description, naicsCode, agency, closeDate,
@@ -259,74 +320,108 @@ def scrape_open_bids(page):
     snap(page, "06_open_bids_page")
 
     bids = []
+    new_fingerprints = set()
 
-    # UNCONFIRMED: this assumes each bid is a row/card with a common
-    # selector like [data-testid="bid-row"] or similar -- placeholder
-    # only. Inspect the real page and replace this selector.
-    bid_elements = page.locator('[data-testid="bid-row"], .bid-list-item, tr.bid-row').all()
+    for page_num in range(1, max_pages + 1):
+        rows = page.locator("div.rt-tbody div.rt-tr").all()
 
-    if not bid_elements:
-        print("WARNING: no bid elements found with placeholder selectors. "
-              "This almost certainly means the selectors need to be updated "
-              "-- run with DEBUG_SCREENSHOTS=true and inspect "
-              "06_open_bids_page.png, or open the page yourself and use "
-              "dev tools to find the real structure.")
+        for row in rows:
+            cells = row.locator("div.rt-td")
+            try:
+                title = cells.nth(0).locator("a").inner_text().strip()
+                organization = cells.nth(1).inner_text().strip()
+            except Exception as e:
+                print(f"WARNING: failed to read a row's title/org, skipping: {e}")
+                continue
 
-    for el in bid_elements:
-        # UNCONFIRMED: every field extraction below is a placeholder.
-        # Replace each selector/attribute with what you find in dev tools.
-        try:
-            bid_id = el.get_attribute("data-bid-id") or ""
-            title = el.locator('.bid-title, [data-testid="bid-title"]').first.inner_text().strip()
-            agency = el.locator('.bid-agency, [data-testid="bid-agency"]').first.inner_text().strip()
-            naics_code = el.locator('.bid-naics, [data-testid="bid-naics"]').first.inner_text().strip()
-            close_date = el.locator('.bid-close-date, [data-testid="bid-close-date"]').first.inner_text().strip()
-            bid_value_text = el.locator('.bid-value, [data-testid="bid-value"]').first.inner_text().strip()
-            bid_url = el.locator("a").first.get_attribute("href") or ""
-            if bid_url and not bid_url.startswith("http"):
-                bid_url = "https://procurement.opengov.com" + bid_url
+            if not title_matches_keywords(title):
+                continue  # cheap skip, no click
 
-            # Bid value likely comes through as text like "$50,000" --
-            # strip non-numeric characters before converting.
-            bid_value = "".join(c for c in bid_value_text if c.isdigit() or c == ".")
-            bid_value = float(bid_value) if bid_value else 0
+            fingerprint = f"{title}|{organization}"
+            if fingerprint in seen_fingerprints:
+                continue  # already sent to Twidget in a prior run
 
-            # UNCONFIRMED: description may not be shown on the listing
-            # page at all -- might require opening each bid's detail
-            # page individually, which would need an extra step here.
-            description = ""
+            # STAGE 2: click into the matching, not-yet-seen bid.
+            try:
+                cells.nth(0).locator("a").click()
+                page.wait_for_load_state("networkidle")
 
-            bids.append({
-                "bidId": bid_id,
-                "title": title,
-                "description": description,
-                "naicsCode": naics_code,
-                "agency": agency,
-                "closeDate": close_date,
-                "bidValue": bid_value,
-                "bidUrl": bid_url,
-            })
-        except Exception as e:
-            print(f"WARNING: failed to parse a bid row, skipping: {e}")
-            continue
+                detail = page.evaluate(
+                    "window.__data.publicProject.project"
+                )
 
-    return bids
+                bid_id = str(detail.get("id", ""))
+                bid_title = detail.get("title", title)
+                description = detail.get("rawSummary") or ""
+                agency = (
+                    detail.get("government", {})
+                    .get("organization", {})
+                    .get("name", organization)
+                )
+                close_date = detail.get("proposalDeadline", "")
+                categories = detail.get("categories", []) or []
+                # Use the first available category code as naicsCode,
+                # if any were filled in by the posting agency -- CAN
+                # legitimately be empty (confirmed on a real posting).
+                naics_code = categories[0]["code"] if categories else ""
+                bid_url = page.url
+
+                bids.append({
+                    "bidId": bid_id,
+                    "title": bid_title,
+                    "description": description,
+                    "naicsCode": naics_code,
+                    "agency": agency,
+                    "closeDate": close_date,
+                    "bidValue": 0,  # no such field exists in OpenGov's data
+                    "bidUrl": bid_url,
+                })
+                new_fingerprints.add(fingerprint)
+
+                page.go_back(wait_until="networkidle")
+            except Exception as e:
+                print(f"WARNING: failed to process bid '{title}', skipping: {e}")
+                # Try to get back to the listing even if something above failed.
+                if "/open-bids" not in page.url:
+                    page.goto(OPEN_BIDS_URL, wait_until="networkidle")
+                continue
+
+        # Pagination: CONFIRMED selector from real HTML --
+        # div.pagination-bottom button (text "Next"), disabled via the
+        # `disabled` attribute on the last page.
+        if page_num < max_pages:
+            next_button = page.locator(".pagination-bottom .-next button")
+            if next_button.is_disabled():
+                break  # reached the last page early
+            next_button.click()
+            page.wait_for_load_state("networkidle")
+
+    return bids, new_fingerprints
 
 
 # --------------------------------------------------------------------
-# State tracking (avoid re-sending bids Twidget already saw --
-# Twidget's own dedup table is the real safety net, this is just an
-# optimization to skip obviously-already-sent bids before making the
-# HTTP call at all)
+# State tracking (avoid re-sending bids Twidget already saw, AND avoid
+# re-clicking into bids we've already fully processed in a prior run --
+# Twidget's own dedup table is the ultimate safety net on the bidId
+# side, but fingerprints are what let us skip the click/page-load
+# entirely for bids we recognize from the listing page alone)
 # --------------------------------------------------------------------
 def load_seen():
+    """
+    Returns (seen_bid_ids, seen_fingerprints) -- two separate sets
+    loaded from the same state file.
+    """
     if STATE_FILE.exists():
-        return set(json.loads(STATE_FILE.read_text()))
-    return set()
+        data = json.loads(STATE_FILE.read_text())
+        return set(data.get("bid_ids", [])), set(data.get("fingerprints", []))
+    return set(), set()
 
 
-def save_seen(seen_set):
-    STATE_FILE.write_text(json.dumps(sorted(seen_set)))
+def save_seen(seen_bid_ids, seen_fingerprints):
+    STATE_FILE.write_text(json.dumps({
+        "bid_ids": sorted(seen_bid_ids),
+        "fingerprints": sorted(seen_fingerprints),
+    }))
 
 
 # --------------------------------------------------------------------
@@ -348,22 +443,22 @@ def send_to_twidget(bid, log_response=False):
 # --------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------
-def process_bids(bids, seen):
+def process_bids(bids, seen_bid_ids):
     """
-    Sends each bid not already in our local 'seen' set to Twidget.
-    Twidget's own dedup table (keyed on bidId) is the authoritative
-    safety net -- this local check just avoids unnecessary HTTP calls
-    for bids we already know we've sent in a prior run.
+    Sends each bid not already in our local seen_bid_ids set to
+    Twidget. (The fingerprint-based skip already happened earlier, in
+    scrape_open_bids, before these bids were even fully scraped -- this
+    is the second, bidId-based check, matching Twidget's own dedup key.)
     """
     sent = 0
     failed = 0
     for bid in bids:
         key = bid["bidId"]
-        if not key or key in seen:
+        if not key or key in seen_bid_ids:
             continue
         try:
             send_to_twidget(bid, log_response=(sent == 0))
-            seen.add(key)
+            seen_bid_ids.add(key)
             sent += 1
         except requests.exceptions.RequestException as e:
             failed += 1
@@ -383,7 +478,23 @@ def main():
     if missing:
         raise SystemExit(f"Missing required environment variable(s): {', '.join(missing)}")
 
-    seen = load_seen()
+    is_first_run = not STATE_FILE.exists()
+    seen_bid_ids, seen_fingerprints = load_seen()
+
+    # First run ever (no state file yet): scan every page to capture the
+    # full current backlog of open bids. Every run after that only
+    # scans the first MAX_PAGES pages, since by then we're just looking
+    # for newly-posted bids, not re-discovering the whole 1,000+ backlog.
+    # 100 is comfortably above the ~72 pages seen at 20 rows/page during
+    # testing -- if the real count is ever higher, the pagination loop
+    # naturally stops itself once the "Next" button becomes disabled, so
+    # this is just a safety ceiling, not a hard assumption about count.
+    pages_to_scan = 100 if is_first_run else MAX_PAGES
+    if is_first_run:
+        print("No state file found -- treating this as the first run and "
+              f"scanning up to {pages_to_scan} pages to capture the full "
+              "current backlog. Future runs will only scan the first "
+              f"{MAX_PAGES} page(s) for new postings.")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
@@ -391,7 +502,7 @@ def main():
 
         try:
             login(page)
-            bids = scrape_open_bids(page)
+            bids, new_fingerprints = scrape_open_bids(page, seen_fingerprints, max_pages=pages_to_scan)
         except PlaywrightTimeoutError as e:
             snap(page, "ERROR_timeout")
             print(f"ERROR: timed out waiting for an expected element: {e}")
@@ -400,10 +511,11 @@ def main():
         finally:
             browser.close()
 
-    print(f"Found {len(bids)} open bid(s) on the page.")
-    new_count = process_bids(bids, seen)
-    save_seen(seen)
-    print(f"Done. {new_count} new bid(s) sent to Twidget (out of {len(bids)} found).")
+    print(f"Found {len(bids)} new keyword-matching bid(s) across up to {pages_to_scan} page(s).")
+    new_count = process_bids(bids, seen_bid_ids)
+    seen_fingerprints |= new_fingerprints
+    save_seen(seen_bid_ids, seen_fingerprints)
+    print(f"Done. {new_count} new bid(s) sent to Twidget.")
 
 
 if __name__ == "__main__":
