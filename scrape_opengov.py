@@ -150,29 +150,54 @@ def login(page):
     page.goto(LOGIN_URL, wait_until="networkidle")
     snap(page, "01_login_page")
 
-    # UNCONFIRMED: adjust this selector to match the real email input.
-    # Common patterns for this kind of SPA login are input[type="email"]
-    # or input[name="email"] -- trying a couple of fallbacks.
-    email_input = page.locator('input[type="email"], input[name="email"]').first
+    # CONFIRMED from real page HTML (view-source, Aug 2026): the email
+    # input has data-qa="login-inputText-email" and id="form-group-email".
+    # Note it's type="text", NOT type="email" -- worth noting since that
+    # was the original (wrong) guess.
+    email_input = page.locator('[data-qa="login-inputText-email"]')
     email_input.wait_for(state="visible", timeout=15000)
     email_input.fill(OPENGOV_EMAIL)
     snap(page, "02_email_filled")
 
-    # UNCONFIRMED: the "Continue" button's exact selector.
-    page.get_by_role("button", name="Continue").click()
+    # CONFIRMED from real page HTML: data-qa="login-button-continue".
+    # This button is disabled (via the disabled attribute) until the
+    # email field has a value -- filling it above should have enabled
+    # it through React's normal controlled-input re-render, but if this
+    # click ever fails because the button is still seen as disabled,
+    # that's the thing to check first.
+    page.locator('[data-qa="login-button-continue"]').click()
     page.wait_for_load_state("networkidle")
     snap(page, "03_after_continue")
 
-    # UNCONFIRMED: password field selector, and whether a distinct
-    # "vendor login" toggle/link needs to be clicked before this point
-    # (you mentioned both a public login and a vendor login exist --
-    # if the page shows a choice here, that selector needs to be added).
+    # UNCONFIRMED AND FLAGGED AS LIKELY WRONG: the real login page's HTML
+    # revealed this site runs on Auth0 (there's a hidden iframe pointing
+    # to an /authorize endpoint with an auth0Client parameter -- classic
+    # Auth0 "silent auth" check). That strongly suggests clicking Continue
+    # navigates to an Auth0-hosted Universal Login page for the password
+    # step -- possibly on a DIFFERENT DOMAIN than procurement.opengov.com
+    # entirely, not just a different page.
+    #
+    # Because of that domain change:
+    #   - The password field's real selector is still unknown (we've
+    #     never seen this page -- snap(page, "03_after_continue") above
+    #     is the debug capture that will finally show it).
+    #   - If Playwright navigated to a new domain, that's expected and
+    #     fine -- Playwright follows redirects/navigations within the
+    #     same page/tab automatically, no extra code needed for that
+    #     part. We just need the real selector once we see the HTML.
+    #
+    # DO NOT trust the selectors below yet -- they're the same
+    # best-guess placeholder as before, kept only so the script doesn't
+    # crash immediately at import/definition time. After running this
+    # once, check the "opengov-debug-output" artifact's
+    # 03_after_continue.html file and replace this block with the real
+    # selectors found there.
     password_input = page.locator('input[type="password"], input[name="password"]').first
     password_input.wait_for(state="visible", timeout=15000)
     password_input.fill(OPENGOV_PASSWORD)
     snap(page, "04_password_filled")
 
-    # UNCONFIRMED: final login button label/selector.
+    # UNCONFIRMED for the same reason as above.
     page.get_by_role("button", name="Log In").click()
     page.wait_for_load_state("networkidle")
     snap(page, "05_after_login")
