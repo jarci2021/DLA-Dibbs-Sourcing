@@ -121,11 +121,19 @@ STATE_FILE = Path(__file__).parent / "opengov_seen_bids.json"
 
 
 def snap(page, name):
-    """Saves a screenshot at a given step, only when DEBUG_SCREENSHOTS is on."""
+    """
+    Saves a screenshot AND the raw page HTML at a given step, only when
+    DEBUG_SCREENSHOTS is on. The HTML dump is what actually lets us find
+    real selectors from a headless CI run (a screenshot alone doesn't
+    show element attributes/names) -- open the .html file in a browser
+    and use dev tools/view-source on it, or just search the raw text for
+    things like "email", "password", "naics", etc.
+    """
     if not DEBUG_SCREENSHOTS:
         return
     SCREENSHOT_DIR.mkdir(exist_ok=True)
     page.screenshot(path=str(SCREENSHOT_DIR / f"{name}.png"), full_page=True)
+    (SCREENSHOT_DIR / f"{name}.html").write_text(page.content(), encoding="utf-8")
 
 
 # --------------------------------------------------------------------
